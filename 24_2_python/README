@@ -1,0 +1,76 @@
+## HTML
+
+### 1. Introduction to HTML [X]
+
+- Definition and Purpose
+- Basic Structure:
+  - `<!DOCTYPE html>` [X]
+  - `<html>` [X]
+  - `<head>` []
+  - `<body>` [X]
+
+### 2. Essential HTML Tags [X]
+
+- **Headings**: `<h1>` to `<h6>`
+- **Paragraphs**: `<p>`
+- **Links**: `<a>` (with `href` attribute)
+- **Images**: `<img>` (with `src` and `alt` attributes)
+- **Lists**:
+  - Unordered: `<ul>`, `<li>`
+  - Ordered: `<ol>`, `<li>`
+
+### 3. Forms and Inputs
+
+- Form Elements:
+  - `<form>`, `<input>`, `<label>`, `<button>`, `<select>`, `<textarea>`
+- Common Input Types: `text`, `password`, `email`, `submit`
+
+### 4. Semantic HTML (Optional)
+
+- Importance of semantic tags
+- Examples: `<header>`, `<nav>`, `<section>`, `<article>`, `<footer>`
+
+---
+
+## CSS
+
+### 1. Introduction to CSS
+
+- Definition and Purpose
+- Ways to Apply CSS:
+  - **Inline**: `style` attribute
+  - **Internal**: `<style>` tag in the `<head>`
+  - **External**: `.css` file with `<link>` tag
+
+### 2. Selectors
+
+- Basic Selectors:
+  - Element: `element`
+  - Class: `.class`
+  - ID: `#id`
+- Grouping and Combining Selectors:
+  - Example: `h1, h2`, `div p`
+
+### 3. Properties and Values
+
+- **Text Styling**:
+  - `color`
+  - `font-family`
+  - `font-size`
+  - `text-align`
+- **Box Model**:
+  - `margin`
+  - `border`
+  - `padding`
+  - `width`, `height`
+- **Backgrounds**:
+  - `background-color`
+  - `background-image`
+
+### 4. Positioning and Layout
+
+- Basic Positioning:
+  - `static`, `relative`, `absolute`, `fixed`
+- **Flexbox** (if time allows):
+  - `display: flex`
+  - `justify-content`, `align-items`

@@ -1,0 +1,44 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.env
+.venv/
+env/
+venv/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editor metadata
+.idea/
+.vscode/
+
+# Preserved nested repository metadata when folding folders into this repo.
+.git.disabled-by-codex/
+**/.git.disabled-by-codex/
+
+# Large local media/archive artifacts.
+# GitHub rejects files over 100 MB unless Git LFS is configured.
+*.zip
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.tar
+*.tar.gz
+*.tgz
+*.7z
