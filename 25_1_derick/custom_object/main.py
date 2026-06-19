@@ -4,7 +4,7 @@ from pathlib import Path
 import cv2 as cv
 import numpy as np
 import streamlit as st
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -253,8 +253,17 @@ def non_max_suppression_license_plate(input_image, detections):
 
 
 @st.cache_resource
-def load_known_faces(faces_dir):
+def load_known_faces(faces_dir, faces_signature):
     return create_known_faces(faces_dir)
+
+
+def faces_dir_signature(faces_dir):
+    paths = sorted(
+        path
+        for path in Path(faces_dir).iterdir()
+        if path.suffix.lower() in {".jpg", ".jpeg", ".png"}
+    )
+    return tuple((path.name, path.stat().st_mtime_ns, path.stat().st_size) for path in paths)
 
 
 def create_known_faces(faces_dir):
@@ -267,13 +276,28 @@ def create_known_faces(faces_dir):
     for image_path in sorted(Path(faces_dir).iterdir()):
         if image_path.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
             continue
-        image = face_recognition.load_image_file(str(image_path))
+        image = load_training_face_image(image_path)
         face_encodings = face_recognition.face_encodings(image)
         if face_encodings:
             encodings.append(face_encodings[0])
-            names.append(image_path.stem)
+            names.append(training_face_name(image_path))
 
     return encodings, names
+
+
+def load_training_face_image(image_path):
+    image = Image.open(image_path)
+    image = ImageOps.exif_transpose(image).convert("RGB")
+    return np.array(image)
+
+
+def training_face_name(image_path):
+    stem = Path(image_path).stem
+    for separator in ("_", "-"):
+        name, found, suffix = stem.rpartition(separator)
+        if found and suffix.isdigit() and name:
+            return name
+    return stem
 
 
 def run_face_recognition(image, known_encodings, known_names, tolerance):
@@ -535,15 +559,22 @@ class LicensePlateVideoProcessor(BaseVideoProcessor):
 
 
 class FaceRecognitionVideoProcessor(BaseVideoProcessor):
-    def __init__(self, faces_dir, tolerance):
+    def __init__(self, faces_dir, tolerance, faces_signature):
         super().__init__()
         self.faces_dir = faces_dir
+        self.faces_signature = faces_signature
         self.known_encodings = None
         self.known_names = None
         self.tolerance = tolerance
 
     def process(self, image):
-        if self.known_encodings is None or self.known_names is None:
+        current_signature = faces_dir_signature(self.faces_dir)
+        if (
+            self.known_encodings is None
+            or self.known_names is None
+            or current_signature != self.faces_signature
+        ):
+            self.faces_signature = current_signature
             self.known_encodings, self.known_names = create_known_faces(self.faces_dir)
         result, _ = run_face_recognition(
             image, self.known_encodings, self.known_names, self.tolerance
@@ -566,9 +597,10 @@ class EasyOCRVideoProcessor(BaseVideoProcessor):
 
 
 class CombinedVideoProcessor(BaseVideoProcessor):
-    def __init__(self, faces_dir, tolerance, languages, use_gpu):
+    def __init__(self, faces_dir, tolerance, languages, use_gpu, faces_signature):
         super().__init__()
         self.faces_dir = faces_dir
+        self.faces_signature = faces_signature
         self.known_encodings = None
         self.known_names = None
         self.tolerance = tolerance
@@ -577,7 +609,13 @@ class CombinedVideoProcessor(BaseVideoProcessor):
         self.reader = None
 
     def process(self, image):
-        if self.known_encodings is None or self.known_names is None:
+        current_signature = faces_dir_signature(self.faces_dir)
+        if (
+            self.known_encodings is None
+            or self.known_names is None
+            or current_signature != self.faces_signature
+        ):
+            self.faces_signature = current_signature
             self.known_encodings, self.known_names = create_known_faces(self.faces_dir)
         if self.reader is None:
             self.reader = create_ocr_reader(self.languages, self.use_gpu)
@@ -620,18 +658,23 @@ def render_face_recognition():
         return
 
     tolerance = st.slider("Tolerance", 0.35, 0.75, 0.6, 0.01)
+    faces_signature = faces_dir_signature(FACES_DIR)
     image = image_video_input(
         "face_recognition",
         lambda: render_video_camera(
             "face_recognition_video",
-            lambda: FaceRecognitionVideoProcessor(str(FACES_DIR), tolerance),
+            lambda: FaceRecognitionVideoProcessor(
+                str(FACES_DIR), tolerance, faces_signature
+            ),
         ),
     )
     if image is None:
         return
 
     with st.spinner("Loading known faces..."):
-        known_encodings, known_names = load_known_faces(str(FACES_DIR))
+        known_encodings, known_names = load_known_faces(
+            str(FACES_DIR), faces_signature
+        )
 
     if not known_names:
         st.warning(f"No known face encodings found in {FACES_DIR}")
@@ -739,6 +782,7 @@ def render_combined():
         "Languages", ["en", "es"], default=["en", "es"], key="combined_languages"
     )
     use_gpu = st.checkbox("GPU", value=False, key="combined_gpu")
+    faces_signature = faces_dir_signature(FACES_DIR)
 
     if not languages:
         st.warning("Select at least one language.")
@@ -749,7 +793,7 @@ def render_combined():
         lambda: render_video_camera(
             "combined_video",
             lambda: CombinedVideoProcessor(
-                str(FACES_DIR), tolerance, tuple(languages), use_gpu
+                str(FACES_DIR), tolerance, tuple(languages), use_gpu, faces_signature
             ),
         ),
     )
@@ -757,7 +801,9 @@ def render_combined():
         return
 
     with st.spinner("Running face recognition and OCR..."):
-        known_encodings, known_names = load_known_faces(str(FACES_DIR))
+        known_encodings, known_names = load_known_faces(
+            str(FACES_DIR), faces_signature
+        )
         face_result, face_rows = run_face_recognition(
             image, known_encodings, known_names, tolerance
         )
