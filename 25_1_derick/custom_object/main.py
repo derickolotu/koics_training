@@ -1,15 +1,27 @@
+import importlib.util
+from pathlib import Path
+
 import cv2 as cv
 import numpy as np
 import streamlit as st
+from PIL import Image, ImageDraw, ImageFont
 
-st.title("YOLOV5 Custom Object Detections")
 
-uploaded_file = st.file_uploader(
-    label="Please upload an image", type=["jpg", "png", "jpeg"]
+APP_DIR = Path(__file__).resolve().parent
+ROOT_DIR = APP_DIR.parents[1]
+YOLO_MODEL_PATH = APP_DIR / "Model" / "weights" / "best.onnx"
+LICENSE_PLATE_MODEL_PATH = (
+    ROOT_DIR / "24_2_python" / "license_plate" / "Model" / "weights" / "best.onnx"
 )
+FACES_DIR = ROOT_DIR / "face-recognition" / "faces"
+OCR_FONT_PATH = ROOT_DIR / "24_2_python" / "calibri.ttf"
+HAS_FACE_RECOGNITION = importlib.util.find_spec("face_recognition") is not None
+HAS_EASYOCR = importlib.util.find_spec("easyocr") is not None
+HAS_STREAMLIT_WEBRTC = importlib.util.find_spec("streamlit_webrtc") is not None
 
-
-labels = [
+INPUT_WIDTH = 640
+INPUT_HEIGHT = 640
+CUSTOM_OBJECT_LABELS = [
     "person",
     "car",
     "chair",
@@ -31,98 +43,710 @@ labels = [
     "diningtable",
     "bus",
 ]
-INPUT_WIDTH = 640
-INPUT_HEIGHT = 640
-
-net = cv.dnn.readNetFromONNX("Model/weights/best.onnx")
+LICENSE_PLATE_ALLOWLIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
 
-if uploaded_file is not None:
+st.set_page_config(page_title="Vision Projects", layout="wide")
+st.title("Computer Vision Projects")
+
+
+def decode_image(uploaded_file):
+    if uploaded_file is None:
+        return None
     file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-    image = cv.imdecode(file_bytes, 1)
+    return cv.imdecode(file_bytes, cv.IMREAD_COLOR)
 
-    st.image(cv.cvtColor(image, cv.COLOR_BGR2RGB), caption="This is the uploaded image")
 
-    def get_predictions(image, net):
-        image_copy = image.copy()
-        r, c, d = image_copy.shape
+def uploaded_image_input(key_prefix):
+    uploaded_file = st.file_uploader(
+        "Image",
+        type=["jpg", "jpeg", "png"],
+        key=f"{key_prefix}_upload",
+    )
+    return decode_image(uploaded_file)
 
-        max_rc = max(r, c)
-        input_image = np.zeros((max_rc, max_rc, 3), dtype=np.uint8)
-        input_image[0:r, 0:c] = image
 
-        # convert the image to blob format BGR RGB
-        blob = cv.dnn.blobFromImage(
-            input_image, 1 / 255, (INPUT_HEIGHT, INPUT_WIDTH), swapRB=True, crop=False
+def image_video_input(key_prefix, video_renderer):
+    upload_tab, camera_tab = st.tabs(["Upload Image", "Camera Video"])
+    with upload_tab:
+        image = uploaded_image_input(key_prefix)
+    with camera_tab:
+        video_renderer()
+
+    return image
+
+
+def render_video_camera(key, video_processor_factory):
+    if not HAS_STREAMLIT_WEBRTC:
+        st.error("Install streamlit-webrtc to use camera video.")
+        return
+
+    try:
+        from streamlit_webrtc import WebRtcMode, webrtc_streamer
+    except Exception as exc:
+        st.error(f"Camera video could not start: {exc}")
+        return
+
+    webrtc_streamer(
+        key=key,
+        mode=WebRtcMode.SENDRECV,
+        media_stream_constraints={"video": True, "audio": False},
+        video_processor_factory=video_processor_factory,
+        async_processing=True,
+    )
+
+
+def show_bgr_image(image, caption=None):
+    st.image(cv.cvtColor(image, cv.COLOR_BGR2RGB), caption=caption)
+
+
+def show_rgb_image(image, caption=None):
+    st.image(image, caption=caption)
+
+
+@st.cache_resource
+def load_yolo_model(model_path):
+    return create_yolo_model(model_path)
+
+
+def create_yolo_model(model_path):
+    net = cv.dnn.readNetFromONNX(str(model_path))
+    net.setPreferableBackend(cv.dnn.DNN_BACKEND_DEFAULT)
+    net.setPreferableTarget(cv.dnn.DNN_TARGET_CPU)
+    return net
+
+
+def get_yolo_predictions(image, net):
+    image_copy = image.copy()
+    rows, cols, _ = image_copy.shape
+    max_size = max(rows, cols)
+    input_image = np.zeros((max_size, max_size, 3), dtype=np.uint8)
+    input_image[0:rows, 0:cols] = image_copy
+
+    blob = cv.dnn.blobFromImage(
+        input_image,
+        1 / 255,
+        (INPUT_HEIGHT, INPUT_WIDTH),
+        swapRB=True,
+        crop=False,
+    )
+    net.setInput(blob)
+    preds = net.forward()
+    return input_image, preds[0]
+
+
+def non_max_suppression(input_image, detections):
+    boxes = []
+    confidences = []
+    class_ids = []
+    image_h, image_w = input_image.shape[:2]
+    proportion_y = image_h / INPUT_HEIGHT
+    proportion_x = image_w / INPUT_WIDTH
+
+    for row in detections:
+        confidence = row[4]
+        if confidence <= 0.28:
+            continue
+
+        class_confidence = row[5:].max()
+        class_id = row[5:].argmax()
+        if class_confidence <= 0.02:
+            continue
+
+        cx, cy, w, h = row[:4]
+        x = int((cx - 0.5 * w) * proportion_x)
+        y = int((cy - 0.5 * h) * proportion_y)
+        width = int(w * proportion_x)
+        height = int(h * proportion_y)
+        boxes.append([x, y, width, height])
+        confidences.append(float(confidence))
+        class_ids.append(int(class_id))
+
+    if not boxes:
+        return [], [], [], []
+
+    indexes = cv.dnn.NMSBoxes(boxes, confidences, 0.25, 0.45)
+    indexes = np.array(indexes).reshape(-1).tolist() if len(indexes) else []
+    return boxes, confidences, class_ids, indexes
+
+
+def draw_yolo_results(image, boxes, confidences, class_ids, indexes):
+    result = image.copy()
+    rows = []
+
+    for index in indexes:
+        x, y, w, h = boxes[index]
+        confidence = confidences[index]
+        class_id = class_ids[index]
+        class_name = (
+            CUSTOM_OBJECT_LABELS[class_id]
+            if class_id < len(CUSTOM_OBJECT_LABELS)
+            else f"class_{class_id}"
         )
-        net.setInput(blob)
-        preds = net.forward()
-        detections = preds[0]
 
-        return input_image, detections
+        cv.rectangle(result, (x, y), (x + w, y + h), (255, 56, 0), 3)
+        cv.rectangle(result, (x, y - 50), (x + w, y), (0, 0, 0), -1)
+        cv.putText(
+            result,
+            f"{class_name} {int(confidence * 100)}%",
+            (x, y - 10),
+            cv.FONT_HERSHEY_PLAIN,
+            2,
+            (255, 255, 255),
+            3,
+        )
+        rows.append(
+            {
+                "label": class_name,
+                "confidence": round(confidence, 3),
+                "box": f"{x}, {y}, {w}, {h}",
+            }
+        )
 
-    def non_max_suppression(input_image, detections):
-        boxes = []
-        confidences = []
-        class_ids = []
+    return result, rows
 
-        image_h, image_w = input_image.shape[:2]
-        proportion_y = image_h / INPUT_HEIGHT
-        proportion_x = image_w / INPUT_WIDTH
-        # [cx, cy, w, h, confidence, 0.3, 0.8, 0]
-        for i in range(len(detections)):
-            row = detections[i]
-            confidence = row[4]
-            if confidence > 0.28:
-                class_confidence = row[5:].max()
-                class_id = row[5:].argmax()
-                if class_confidence > 0.02:
-                    cx, cy, w, h = row[:4]
-                    x = int((cx - 0.5 * w) * proportion_x)
-                    y = int((cy - 0.5 * h) * proportion_y)
-                    width = int(w * proportion_x)
-                    height = int(h * proportion_y)
-                    box = np.array([x, y, width, height])
 
-                    boxes.append(box)
-                    confidences.append(confidence)
-                    class_ids.append(class_id)
-        boxes_np = np.array(boxes).tolist()
-        confidences_np = np.array(confidences).tolist()
-        class_ids_np = np.array(class_ids).tolist()
+def run_yolo(image, net):
+    input_image, detections = get_yolo_predictions(image, net)
+    boxes, confidences, class_ids, indexes = non_max_suppression(
+        input_image, detections
+    )
+    return draw_yolo_results(image, boxes, confidences, class_ids, indexes)
 
-        index = cv.dnn.NMSBoxes(boxes_np, confidences_np, 0.25, 0.45)  # [3]
 
-        return boxes_np, confidences_np, class_ids_np, index
+def non_max_suppression_license_plate(input_image, detections):
+    boxes = []
+    confidences = []
+    image_h, image_w = input_image.shape[:2]
+    proportion_y = image_h / INPUT_HEIGHT
+    proportion_x = image_w / INPUT_WIDTH
 
-    def results(image, boxes_np, confidences_np, class_ids_np, index):
-        for ind in index:
-            x, y, w, h = boxes_np[ind]
-            bb_conf = int(confidences_np[ind] * 100)
-            class_id = class_ids_np[ind]
-            class_name = labels[class_id]
+    for row in detections:
+        confidence = row[4]
+        if confidence <= 0.28:
+            continue
 
-            cv.rectangle(image, (x, y), (x + w, y + h), (255, 56, 0), 3)
-            cv.rectangle(image, (x, y - 50), (x + w, y), (0, 0, 0), -1)
+        class_confidence = row[5] if len(row) > 5 else confidence
+        if class_confidence <= 0.02:
+            continue
+
+        cx, cy, w, h = row[:4]
+        x = int((cx - 0.5 * w) * proportion_x)
+        y = int((cy - 0.5 * h) * proportion_y)
+        width = int(w * proportion_x)
+        height = int(h * proportion_y)
+        boxes.append([x, y, width, height])
+        confidences.append(float(confidence))
+
+    if not boxes:
+        return [], [], []
+
+    indexes = cv.dnn.NMSBoxes(boxes, confidences, 0.25, 0.45)
+    indexes = np.array(indexes).reshape(-1).tolist() if len(indexes) else []
+    return boxes, confidences, indexes
+
+
+@st.cache_resource
+def load_known_faces(faces_dir):
+    return create_known_faces(faces_dir)
+
+
+def create_known_faces(faces_dir):
+    if not HAS_FACE_RECOGNITION:
+        raise RuntimeError("The face_recognition package is not installed.")
+    import face_recognition
+
+    encodings = []
+    names = []
+    for image_path in sorted(Path(faces_dir).iterdir()):
+        if image_path.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
+            continue
+        image = face_recognition.load_image_file(str(image_path))
+        face_encodings = face_recognition.face_encodings(image)
+        if face_encodings:
+            encodings.append(face_encodings[0])
+            names.append(image_path.stem)
+
+    return encodings, names
+
+
+def run_face_recognition(image, known_encodings, known_names, tolerance):
+    if not HAS_FACE_RECOGNITION:
+        raise RuntimeError("The face_recognition package is not installed.")
+    import face_recognition
+
+    result = image.copy()
+    rgb = cv.cvtColor(image, cv.COLOR_BGR2RGB)
+    face_locations = face_recognition.face_locations(rgb)
+    face_encodings = face_recognition.face_encodings(rgb, face_locations)
+    rows = []
+
+    for (top, right, bottom, left), face_encoding in zip(
+        face_locations, face_encodings
+    ):
+        name = "Unknown"
+        distance = None
+
+        if known_encodings:
+            distances = face_recognition.face_distance(known_encodings, face_encoding)
+            best_match_index = int(np.argmin(distances))
+            distance = float(distances[best_match_index])
+            if distance <= tolerance:
+                name = known_names[best_match_index]
+
+        cv.rectangle(result, (left, top), (right, bottom), (0, 160, 255), 2)
+        cv.rectangle(result, (left, max(top - 34, 0)), (right, top), (0, 160, 255), -1)
+        cv.putText(
+            result,
+            name,
+            (left + 6, max(top - 10, 20)),
+            cv.FONT_HERSHEY_DUPLEX,
+            0.8,
+            (0, 0, 0),
+            1,
+        )
+        rows.append(
+            {
+                "name": name,
+                "distance": round(distance, 3) if distance is not None else None,
+                "box": f"{left}, {top}, {right - left}, {bottom - top}",
+            }
+        )
+
+    return result, rows
+
+
+@st.cache_resource
+def load_ocr_reader(languages, use_gpu):
+    return create_ocr_reader(languages, use_gpu)
+
+
+def create_ocr_reader(languages, use_gpu):
+    if not HAS_EASYOCR:
+        raise RuntimeError("The easyocr package is not installed.")
+    from easyocr import Reader
+
+    return Reader(list(languages), gpu=use_gpu)
+
+
+def get_font(size):
+    try:
+        return ImageFont.truetype(str(OCR_FONT_PATH), size)
+    except OSError:
+        return ImageFont.load_default()
+
+
+def box_points(box):
+    left_top, right_top, right_bottom, left_bottom = box
+    return (
+        (int(left_top[0]), int(left_top[1])),
+        (int(right_top[0]), int(right_top[1])),
+        (int(right_bottom[0]), int(right_bottom[1])),
+        (int(left_bottom[0]), int(left_bottom[1])),
+    )
+
+
+def draw_ocr_text(image_rgb, text, x, y, color=(50, 50, 255), font_size=22):
+    image_pil = Image.fromarray(image_rgb)
+    draw = ImageDraw.Draw(image_pil)
+    draw.text((x, max(y - font_size, 0)), text, font=get_font(font_size), fill=color)
+    return np.array(image_pil)
+
+
+def run_easyocr(image, reader):
+    result = cv.cvtColor(image.copy(), cv.COLOR_BGR2RGB)
+    detections = reader.readtext(result)
+    rows = []
+
+    for box, text, confidence in detections:
+        left_top, _, right_bottom, _ = box_points(box)
+        cv.rectangle(result, left_top, right_bottom, color=(255, 0, 50), thickness=2)
+        result = draw_ocr_text(text=text, x=left_top[0], y=left_top[1], image_rgb=result)
+        rows.append({"text": text, "confidence": round(float(confidence), 3)})
+
+    return result, rows
+
+
+def crop_box(image, x, y, width, height, padding=6):
+    image_h, image_w = image.shape[:2]
+    left = max(x - padding, 0)
+    top = max(y - padding, 0)
+    right = min(x + width + padding, image_w)
+    bottom = min(y + height + padding, image_h)
+    if right <= left or bottom <= top:
+        return None
+    return image[top:bottom, left:right]
+
+
+def read_plate_text(crop_bgr, reader):
+    if reader is None or crop_bgr is None or crop_bgr.size == 0:
+        return "", None
+
+    crop_rgb = cv.cvtColor(crop_bgr, cv.COLOR_BGR2RGB)
+    detections = reader.readtext(crop_rgb, allowlist=LICENSE_PLATE_ALLOWLIST)
+    cleaned_text = []
+    confidences = []
+
+    for _, text, confidence in detections:
+        normalized = "".join(char for char in text.upper() if char.isalnum())
+        if normalized:
+            cleaned_text.append(normalized)
+            confidences.append(float(confidence))
+
+    if not cleaned_text:
+        return "", None
+
+    average_confidence = sum(confidences) / len(confidences)
+    return " ".join(cleaned_text), average_confidence
+
+
+def run_license_plate_recognition(image, net, reader=None):
+    input_image, detections = get_yolo_predictions(image, net)
+    boxes, confidences, indexes = non_max_suppression_license_plate(
+        input_image, detections
+    )
+    result = image.copy()
+    rows = []
+
+    for index in indexes:
+        x, y, width, height = boxes[index]
+        detector_confidence = confidences[index]
+        crop = crop_box(image, x, y, width, height)
+        plate_text, ocr_confidence = read_plate_text(crop, reader)
+        label = plate_text if plate_text else "license plate"
+
+        top = max(y, 0)
+        left = max(x, 0)
+        right = min(x + width, image.shape[1])
+        bottom = min(y + height, image.shape[0])
+        cv.rectangle(result, (left, top), (right, bottom), (30, 180, 255), 3)
+        label_top = max(top - 38, 0)
+        cv.rectangle(result, (left, label_top), (right, top), (0, 0, 0), -1)
+        cv.putText(
+            result,
+            f"{label} {int(detector_confidence * 100)}%",
+            (left + 5, max(top - 10, 24)),
+            cv.FONT_HERSHEY_PLAIN,
+            1.4,
+            (255, 255, 255),
+            2,
+        )
+        rows.append(
+            {
+                "plate_text": plate_text or None,
+                "detector_confidence": round(detector_confidence, 3),
+                "ocr_confidence": round(ocr_confidence, 3)
+                if ocr_confidence is not None
+                else None,
+                "box": f"{left}, {top}, {right - left}, {bottom - top}",
+            }
+        )
+
+    return result, rows
+
+
+def render_rows(rows):
+    if rows:
+        st.dataframe(rows, width="stretch", hide_index=True)
+    else:
+        st.info("No results found.")
+
+
+class BaseVideoProcessor:
+    def __init__(self):
+        import av
+
+        self.av = av
+
+    def recv(self, frame):
+        image = frame.to_ndarray(format="bgr24")
+        try:
+            result = self.process(image)
+        except Exception as exc:
+            result = image.copy()
             cv.putText(
-                image,
-                f"{class_name} {bb_conf}%",
-                (x, y - 10),
-                cv.FONT_HERSHEY_PLAIN,
+                result,
+                str(exc)[:100],
+                (20, 40),
+                cv.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 0, 255),
                 2,
-                (255, 255, 255),
-                3,
             )
 
+        result = np.ascontiguousarray(result)
+        output_frame = self.av.VideoFrame.from_ndarray(result, format="bgr24")
+        output_frame.pts = frame.pts
+        output_frame.time_base = frame.time_base
+        return output_frame
+
+    def process(self, image):
         return image
 
-    def yolo_custom(img, net):
-        input_image, detections = get_predictions(img, net)
-        boxes_np, confidences_np, class_ids_np, index = non_max_suppression(
-            input_image, detections
-        )
-        result = results(img, boxes_np, confidences_np, class_ids_np, index)
+
+class ObjectDetectionVideoProcessor(BaseVideoProcessor):
+    def __init__(self, model_path):
+        super().__init__()
+        self.net = create_yolo_model(model_path)
+
+    def process(self, image):
+        result, _ = run_yolo(image, self.net)
         return result
 
-    result = yolo_custom(image, net)
-    st.image(result)
+
+class LicensePlateVideoProcessor(BaseVideoProcessor):
+    def __init__(self, model_path, read_text, languages, use_gpu):
+        super().__init__()
+        self.net = create_yolo_model(model_path)
+        self.reader = create_ocr_reader(languages, use_gpu) if read_text else None
+
+    def process(self, image):
+        result, _ = run_license_plate_recognition(image, self.net, self.reader)
+        return result
+
+
+class FaceRecognitionVideoProcessor(BaseVideoProcessor):
+    def __init__(self, faces_dir, tolerance):
+        super().__init__()
+        self.known_encodings, self.known_names = create_known_faces(faces_dir)
+        self.tolerance = tolerance
+
+    def process(self, image):
+        result, _ = run_face_recognition(
+            image, self.known_encodings, self.known_names, self.tolerance
+        )
+        return result
+
+
+class EasyOCRVideoProcessor(BaseVideoProcessor):
+    def __init__(self, languages, use_gpu):
+        super().__init__()
+        self.reader = create_ocr_reader(languages, use_gpu)
+
+    def process(self, image):
+        result, _ = run_easyocr(image, self.reader)
+        return cv.cvtColor(result, cv.COLOR_RGB2BGR)
+
+
+class CombinedVideoProcessor(BaseVideoProcessor):
+    def __init__(self, faces_dir, tolerance, languages, use_gpu):
+        super().__init__()
+        self.known_encodings, self.known_names = create_known_faces(faces_dir)
+        self.tolerance = tolerance
+        self.reader = create_ocr_reader(languages, use_gpu)
+
+    def process(self, image):
+        face_result, _ = run_face_recognition(
+            image, self.known_encodings, self.known_names, self.tolerance
+        )
+        ocr_result, _ = run_easyocr(face_result, self.reader)
+        return cv.cvtColor(ocr_result, cv.COLOR_RGB2BGR)
+
+
+def render_object_detection():
+    st.header("YOLOV5 Custom Object Detection")
+    if not YOLO_MODEL_PATH.exists():
+        st.error(f"Model file not found: {YOLO_MODEL_PATH}")
+        return
+
+    image = image_video_input(
+        "object_detection",
+        lambda: render_video_camera(
+            "object_detection_video",
+            lambda: ObjectDetectionVideoProcessor(str(YOLO_MODEL_PATH)),
+        ),
+    )
+    if image is None:
+        return
+
+    show_bgr_image(image, "Input")
+    with st.spinner("Running object detection..."):
+        net = load_yolo_model(str(YOLO_MODEL_PATH))
+        result, rows = run_yolo(image, net)
+
+    show_bgr_image(result, "Detections")
+    render_rows(rows)
+
+
+def render_face_recognition():
+    st.header("Face Recognition")
+    if not HAS_FACE_RECOGNITION:
+        st.error("Install face_recognition to use this project.")
+        return
+
+    tolerance = st.slider("Tolerance", 0.35, 0.75, 0.6, 0.01)
+    image = image_video_input(
+        "face_recognition",
+        lambda: render_video_camera(
+            "face_recognition_video",
+            lambda: FaceRecognitionVideoProcessor(str(FACES_DIR), tolerance),
+        ),
+    )
+    if image is None:
+        return
+
+    with st.spinner("Loading known faces..."):
+        known_encodings, known_names = load_known_faces(str(FACES_DIR))
+
+    if not known_names:
+        st.warning(f"No known face encodings found in {FACES_DIR}")
+
+    with st.spinner("Recognizing faces..."):
+        result, rows = run_face_recognition(
+            image, known_encodings, known_names, tolerance
+        )
+
+    show_bgr_image(result, "Recognized faces")
+    render_rows(rows)
+
+
+def render_easyocr():
+    st.header("EasyOCR")
+    if not HAS_EASYOCR:
+        st.error("Install easyocr to use this project.")
+        return
+
+    languages = st.multiselect("Languages", ["en", "es"], default=["en", "es"])
+    use_gpu = st.checkbox("GPU", value=False)
+    if not languages:
+        st.warning("Select at least one language.")
+        return
+
+    image = image_video_input(
+        "easyocr",
+        lambda: render_video_camera(
+            "easyocr_video",
+            lambda: EasyOCRVideoProcessor(tuple(languages), use_gpu),
+        ),
+    )
+    if image is None:
+        return
+
+    with st.spinner("Reading text..."):
+        reader = load_ocr_reader(tuple(languages), use_gpu)
+        result, rows = run_easyocr(image, reader)
+
+    show_rgb_image(result, "OCR results")
+    render_rows(rows)
+
+
+def render_license_plate_recognition():
+    st.header("License Plate Recognition")
+    if not LICENSE_PLATE_MODEL_PATH.exists():
+        st.error(f"Model file not found: {LICENSE_PLATE_MODEL_PATH}")
+        return
+
+    read_text = st.checkbox("Read plate text with EasyOCR", value=True)
+
+    if read_text and not HAS_EASYOCR:
+        st.error("Install easyocr to read license plate text.")
+        return
+
+    languages = []
+    use_gpu = False
+    if read_text:
+        languages = st.multiselect(
+            "OCR languages",
+            ["en", "es"],
+            default=["en"],
+            key="license_plate_languages",
+        )
+        use_gpu = st.checkbox("GPU", value=False, key="license_plate_gpu")
+
+    if read_text and not languages:
+        st.warning("Select at least one OCR language.")
+        return
+
+    image = image_video_input(
+        "license_plate",
+        lambda: render_video_camera(
+            "license_plate_video",
+            lambda: LicensePlateVideoProcessor(
+                str(LICENSE_PLATE_MODEL_PATH), read_text, tuple(languages), use_gpu
+            ),
+        ),
+    )
+    if image is None:
+        return
+
+    with st.spinner("Detecting license plates..."):
+        net = load_yolo_model(str(LICENSE_PLATE_MODEL_PATH))
+        reader = load_ocr_reader(tuple(languages), use_gpu) if read_text else None
+        result, rows = run_license_plate_recognition(image, net, reader)
+
+    show_bgr_image(result, "License plate results")
+    render_rows(rows)
+
+
+def render_combined():
+    st.header("Face Recognition + EasyOCR")
+    missing = []
+    if not HAS_FACE_RECOGNITION:
+        missing.append("face_recognition")
+    if not HAS_EASYOCR:
+        missing.append("easyocr")
+    if missing:
+        st.error(f"Install {', '.join(missing)} to use this project.")
+        return
+
+    tolerance = st.slider("Tolerance", 0.35, 0.75, 0.6, 0.01, key="combined_tol")
+    languages = st.multiselect(
+        "Languages", ["en", "es"], default=["en", "es"], key="combined_languages"
+    )
+    use_gpu = st.checkbox("GPU", value=False, key="combined_gpu")
+
+    if not languages:
+        st.warning("Select at least one language.")
+        return
+
+    image = image_video_input(
+        "combined",
+        lambda: render_video_camera(
+            "combined_video",
+            lambda: CombinedVideoProcessor(
+                str(FACES_DIR), tolerance, tuple(languages), use_gpu
+            ),
+        ),
+    )
+    if image is None:
+        return
+
+    with st.spinner("Running face recognition and OCR..."):
+        known_encodings, known_names = load_known_faces(str(FACES_DIR))
+        face_result, face_rows = run_face_recognition(
+            image, known_encodings, known_names, tolerance
+        )
+        reader = load_ocr_reader(tuple(languages), use_gpu)
+        ocr_result, ocr_rows = run_easyocr(face_result, reader)
+
+    show_rgb_image(ocr_result, "Combined results")
+    left_col, right_col = st.columns(2)
+    with left_col:
+        st.subheader("Faces")
+        render_rows(face_rows)
+    with right_col:
+        st.subheader("Text")
+        render_rows(ocr_rows)
+
+
+project = st.sidebar.radio(
+    "Project",
+    [
+        "Object Detection",
+        "License Plate Recognition",
+        "Face Recognition",
+        "EasyOCR",
+        "Face + OCR",
+    ],
+)
+
+if project == "Object Detection":
+    render_object_detection()
+elif project == "License Plate Recognition":
+    render_license_plate_recognition()
+elif project == "Face Recognition":
+    render_face_recognition()
+elif project == "EasyOCR":
+    render_easyocr()
+else:
+    render_combined()

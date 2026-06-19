@@ -1,3 +1,9 @@
 numpy
-openc-python
+opencv-python
 matplotlib
+pillow
+streamlit
+easyocr
+face-recognition
+streamlit-webrtc
+av
