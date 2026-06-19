@@ -18,6 +18,7 @@ OCR_FONT_PATH = ROOT_DIR / "24_2_python" / "calibri.ttf"
 HAS_FACE_RECOGNITION = importlib.util.find_spec("face_recognition") is not None
 HAS_EASYOCR = importlib.util.find_spec("easyocr") is not None
 HAS_STREAMLIT_WEBRTC = importlib.util.find_spec("streamlit_webrtc") is not None
+WEBRTC_DEVICE_PATCHED = False
 
 INPUT_WIDTH = 640
 INPUT_HEIGHT = 640
@@ -83,6 +84,11 @@ def render_video_camera(key, video_processor_factory):
         return
 
     try:
+        patch_streamlit_webrtc_device_selection()
+    except OSError as exc:
+        st.warning(f"Camera device selection patch could not be applied: {exc}")
+
+    try:
         from streamlit_webrtc import WebRtcMode, webrtc_streamer
     except Exception as exc:
         st.error(f"Camera video could not start: {exc}")
@@ -91,6 +97,10 @@ def render_video_camera(key, video_processor_factory):
     try:
         video_col, _ = st.columns(CAMERA_VIDEO_LAYOUT)
         with video_col:
+            st.caption(
+                "To switch cameras: STOP, SELECT DEVICE, choose the camera, "
+                "Done, then START."
+            )
             webrtc_streamer(
                 key=key,
                 mode=WebRtcMode.SENDRECV,
@@ -100,6 +110,53 @@ def render_video_camera(key, video_processor_factory):
             )
     except Exception as exc:
         st.error(f"Camera video could not initialize: {exc}")
+
+
+def patch_streamlit_webrtc_device_selection():
+    global WEBRTC_DEVICE_PATCHED
+    if WEBRTC_DEVICE_PATCHED:
+        return
+
+    spec = importlib.util.find_spec("streamlit_webrtc")
+    if spec is None or spec.origin is None:
+        WEBRTC_DEVICE_PATCHED = True
+        return
+
+    asset_dir = Path(spec.origin).parent / "frontend" / "dist" / "assets"
+    replacements = {
+        "index-*.js": {
+            "r.video={deviceId:t}": "r.video={deviceId:{exact:t}}",
+            "r.video={...r.video,deviceId:t}": (
+                "r.video={...r.video,deviceId:{exact:t}}"
+            ),
+            "r.audio={deviceId:n}": "r.audio={deviceId:{exact:n}}",
+            "r.audio={...r.audio,deviceId:n}": (
+                "r.audio={...r.audio,deviceId:{exact:n}}"
+            ),
+        },
+        "DeviceSelectForm-*.js": {
+            "video:{deviceId:e.deviceId},audio:!1": (
+                "video:{deviceId:{exact:e.deviceId}},audio:!1"
+            ),
+            "video:t&&e?{deviceId:e}:t": (
+                "video:t&&e?{deviceId:{exact:e}}:t"
+            ),
+            "audio:n&&r?{deviceId:r}:n": (
+                "audio:n&&r?{deviceId:{exact:r}}:n"
+            ),
+        },
+    }
+
+    for pattern, patch_set in replacements.items():
+        for asset_path in asset_dir.glob(pattern):
+            text = asset_path.read_text()
+            patched = text
+            for old, new in patch_set.items():
+                patched = patched.replace(old, new)
+            if patched != text:
+                asset_path.write_text(patched)
+
+    WEBRTC_DEVICE_PATCHED = True
 
 
 def show_bgr_image(image, caption=None):
