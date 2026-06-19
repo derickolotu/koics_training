@@ -87,13 +87,16 @@ def render_video_camera(key, video_processor_factory):
         st.error(f"Camera video could not start: {exc}")
         return
 
-    webrtc_streamer(
-        key=key,
-        mode=WebRtcMode.SENDRECV,
-        media_stream_constraints={"video": True, "audio": False},
-        video_processor_factory=video_processor_factory,
-        async_processing=True,
-    )
+    try:
+        webrtc_streamer(
+            key=key,
+            mode=WebRtcMode.SENDRECV,
+            media_stream_constraints={"video": True, "audio": False},
+            video_processor_factory=video_processor_factory,
+            async_processing=True,
+        )
+    except Exception as exc:
+        st.error(f"Camera video could not initialize: {exc}")
 
 
 def show_bgr_image(image, caption=None):
@@ -454,9 +457,7 @@ def render_rows(rows):
 
 class BaseVideoProcessor:
     def __init__(self):
-        import av
-
-        self.av = av
+        self.status_message = "Loading camera model..."
 
     def recv(self, frame):
         image = frame.to_ndarray(format="bgr24")
@@ -475,7 +476,7 @@ class BaseVideoProcessor:
             )
 
         result = np.ascontiguousarray(result)
-        output_frame = self.av.VideoFrame.from_ndarray(result, format="bgr24")
+        output_frame = type(frame).from_ndarray(result, format="bgr24")
         output_frame.pts = frame.pts
         output_frame.time_base = frame.time_base
         return output_frame
@@ -483,13 +484,30 @@ class BaseVideoProcessor:
     def process(self, image):
         return image
 
+    def draw_status(self, image):
+        result = image.copy()
+        cv.rectangle(result, (0, 0), (result.shape[1], 70), (0, 0, 0), -1)
+        cv.putText(
+            result,
+            self.status_message,
+            (20, 44),
+            cv.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (255, 255, 255),
+            2,
+        )
+        return result
+
 
 class ObjectDetectionVideoProcessor(BaseVideoProcessor):
     def __init__(self, model_path):
         super().__init__()
-        self.net = create_yolo_model(model_path)
+        self.model_path = model_path
+        self.net = None
 
     def process(self, image):
+        if self.net is None:
+            self.net = create_yolo_model(self.model_path)
         result, _ = run_yolo(image, self.net)
         return result
 
@@ -497,10 +515,18 @@ class ObjectDetectionVideoProcessor(BaseVideoProcessor):
 class LicensePlateVideoProcessor(BaseVideoProcessor):
     def __init__(self, model_path, read_text, languages, use_gpu):
         super().__init__()
-        self.net = create_yolo_model(model_path)
-        self.reader = create_ocr_reader(languages, use_gpu) if read_text else None
+        self.model_path = model_path
+        self.read_text = read_text
+        self.languages = languages
+        self.use_gpu = use_gpu
+        self.net = None
+        self.reader = None
 
     def process(self, image):
+        if self.net is None:
+            self.net = create_yolo_model(self.model_path)
+        if self.read_text and self.reader is None:
+            self.reader = create_ocr_reader(self.languages, self.use_gpu)
         result, _ = run_license_plate_recognition(image, self.net, self.reader)
         return result
 
@@ -508,10 +534,14 @@ class LicensePlateVideoProcessor(BaseVideoProcessor):
 class FaceRecognitionVideoProcessor(BaseVideoProcessor):
     def __init__(self, faces_dir, tolerance):
         super().__init__()
-        self.known_encodings, self.known_names = create_known_faces(faces_dir)
+        self.faces_dir = faces_dir
+        self.known_encodings = None
+        self.known_names = None
         self.tolerance = tolerance
 
     def process(self, image):
+        if self.known_encodings is None or self.known_names is None:
+            self.known_encodings, self.known_names = create_known_faces(self.faces_dir)
         result, _ = run_face_recognition(
             image, self.known_encodings, self.known_names, self.tolerance
         )
@@ -521,9 +551,13 @@ class FaceRecognitionVideoProcessor(BaseVideoProcessor):
 class EasyOCRVideoProcessor(BaseVideoProcessor):
     def __init__(self, languages, use_gpu):
         super().__init__()
-        self.reader = create_ocr_reader(languages, use_gpu)
+        self.languages = languages
+        self.use_gpu = use_gpu
+        self.reader = None
 
     def process(self, image):
+        if self.reader is None:
+            self.reader = create_ocr_reader(self.languages, self.use_gpu)
         result, _ = run_easyocr(image, self.reader)
         return cv.cvtColor(result, cv.COLOR_RGB2BGR)
 
@@ -531,11 +565,19 @@ class EasyOCRVideoProcessor(BaseVideoProcessor):
 class CombinedVideoProcessor(BaseVideoProcessor):
     def __init__(self, faces_dir, tolerance, languages, use_gpu):
         super().__init__()
-        self.known_encodings, self.known_names = create_known_faces(faces_dir)
+        self.faces_dir = faces_dir
+        self.known_encodings = None
+        self.known_names = None
         self.tolerance = tolerance
-        self.reader = create_ocr_reader(languages, use_gpu)
+        self.languages = languages
+        self.use_gpu = use_gpu
+        self.reader = None
 
     def process(self, image):
+        if self.known_encodings is None or self.known_names is None:
+            self.known_encodings, self.known_names = create_known_faces(self.faces_dir)
+        if self.reader is None:
+            self.reader = create_ocr_reader(self.languages, self.use_gpu)
         face_result, _ = run_face_recognition(
             image, self.known_encodings, self.known_names, self.tolerance
         )
