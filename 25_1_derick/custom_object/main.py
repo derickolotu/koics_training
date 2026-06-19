@@ -44,7 +44,7 @@ CUSTOM_OBJECT_LABELS = [
     "bus",
 ]
 LICENSE_PLATE_ALLOWLIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-CAMERA_VIDEO_WIDTH = "65%"
+CAMERA_VIDEO_LAYOUT = [65, 35]
 
 
 st.set_page_config(page_title="Vision Projects", layout="wide")
@@ -89,20 +89,15 @@ def render_video_camera(key, video_processor_factory):
         return
 
     try:
-        webrtc_streamer(
-            key=key,
-            mode=WebRtcMode.SENDRECV,
-            media_stream_constraints={"video": True, "audio": False},
-            video_html_attrs={
-                "style": {
-                    "width": CAMERA_VIDEO_WIDTH,
-                    "maxWidth": CAMERA_VIDEO_WIDTH,
-                    "height": "auto",
-                }
-            },
-            video_processor_factory=video_processor_factory,
-            async_processing=True,
-        )
+        video_col, _ = st.columns(CAMERA_VIDEO_LAYOUT)
+        with video_col:
+            webrtc_streamer(
+                key=key,
+                mode=WebRtcMode.SENDRECV,
+                media_stream_constraints={"video": True, "audio": False},
+                video_processor_factory=video_processor_factory,
+                async_processing=True,
+            )
     except Exception as exc:
         st.error(f"Camera video could not initialize: {exc}")
 
