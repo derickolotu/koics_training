@@ -13,4 +13,4 @@ Notes:
 
 - The app uses `streamlit-webrtc`, so camera access must run over HTTPS. Streamlit Community Cloud provides HTTPS automatically.
 - The dependency files are in the repository root so Community Cloud detects both Python packages and Debian packages reliably.
-- If the app build fails, open the Streamlit Cloud logs first. The likely failure point is compiling `dlib`, which is required by `face-recognition`.
+- The free Community Cloud deployment excludes `face-recognition` because it requires `dlib`, which commonly fails or times out while compiling on free builders. The deployed app will still run object detection, license plate detection, camera video, and EasyOCR. Face Recognition remains available locally where `face-recognition` is installed.
