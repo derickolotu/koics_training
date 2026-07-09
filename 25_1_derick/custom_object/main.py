@@ -781,7 +781,13 @@ def render_license_plate_recognition():
         st.error(f"Model file not found: {LICENSE_PLATE_MODEL_PATH}")
         return
 
-    read_text = st.checkbox("Read plate text with EasyOCR", value=True)
+    if not HAS_EASYOCR:
+        st.info(
+            "EasyOCR is not installed in this deployment, so license plate text "
+            "reading is disabled. Plate detection still works."
+        )
+
+    read_text = st.checkbox("Read plate text with EasyOCR", value=HAS_EASYOCR)
 
     if read_text and not HAS_EASYOCR:
         st.error("Install easyocr to read license plate text.")
