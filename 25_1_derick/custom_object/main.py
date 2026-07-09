@@ -83,10 +83,7 @@ def render_video_camera(key, video_processor_factory):
         st.error("Install streamlit-webrtc to use camera video.")
         return
 
-    try:
-        patch_streamlit_webrtc_device_selection()
-    except OSError as exc:
-        st.warning(f"Camera device selection patch could not be applied: {exc}")
+    patch_streamlit_webrtc_device_selection()
 
     try:
         from streamlit_webrtc import WebRtcMode, webrtc_streamer
@@ -123,6 +120,10 @@ def patch_streamlit_webrtc_device_selection():
         return
 
     asset_dir = Path(spec.origin).parent / "frontend" / "dist" / "assets"
+    if not asset_dir.is_dir():
+        WEBRTC_DEVICE_PATCHED = True
+        return
+
     replacements = {
         "index-*.js": {
             "r.video={deviceId:t}": "r.video={deviceId:{exact:t}}",
@@ -154,7 +155,11 @@ def patch_streamlit_webrtc_device_selection():
             for old, new in patch_set.items():
                 patched = patched.replace(old, new)
             if patched != text:
-                asset_path.write_text(patched)
+                try:
+                    asset_path.write_text(patched)
+                except OSError:
+                    WEBRTC_DEVICE_PATCHED = True
+                    return
 
     WEBRTC_DEVICE_PATCHED = True
 
