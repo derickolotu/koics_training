@@ -1,0 +1,8 @@
+build-essential
+cmake
+pkg-config
+libopenblas-dev
+liblapack-dev
+libx11-dev
+libglib2.0-0
+libgl1
