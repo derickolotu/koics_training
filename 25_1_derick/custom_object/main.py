@@ -53,6 +53,7 @@ DEFAULT_WEBRTC_ICE_SERVERS = [
     {"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]}
 ]
 WEBRTC_TURN_FETCH_TIMEOUT_SECONDS = 5
+WEBRTC_FORCE_RELAY_WITH_TURN = True
 
 
 st.set_page_config(page_title="Vision Projects", layout="wide")
@@ -111,6 +112,30 @@ def parse_ice_servers_json(value):
     return ice_servers
 
 
+def get_ice_server_urls(ice_server):
+    urls = ice_server.get("urls", []) if isinstance(ice_server, dict) else []
+    if isinstance(urls, str):
+        return [urls]
+    if isinstance(urls, list):
+        return [url for url in urls if isinstance(url, str)]
+    return []
+
+
+def has_turn_server(ice_servers):
+    return any(
+        url.startswith(("turn:", "turns:"))
+        for ice_server in ice_servers
+        for url in get_ice_server_urls(ice_server)
+    )
+
+
+def make_rtc_configuration(ice_servers):
+    configuration = {"iceServers": ice_servers}
+    if WEBRTC_FORCE_RELAY_WITH_TURN and has_turn_server(ice_servers):
+        configuration["iceTransportPolicy"] = "relay"
+    return configuration
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_metered_ice_servers(app_name, api_key):
     encoded_key = urllib.parse.quote(api_key)
@@ -133,7 +158,7 @@ def build_webrtc_rtc_configuration():
     ice_servers_json = get_webrtc_secret("ice_servers_json")
     if ice_servers_json:
         try:
-            return {"iceServers": parse_ice_servers_json(ice_servers_json)}
+            return make_rtc_configuration(parse_ice_servers_json(ice_servers_json))
         except Exception:
             st.warning("Invalid TURN server JSON in Streamlit secrets; using STUN only.")
 
@@ -143,15 +168,24 @@ def build_webrtc_rtc_configuration():
     metered_api_key = get_webrtc_secret("metered_api_key")
     if metered_app_name and metered_api_key:
         try:
-            return {
-                "iceServers": fetch_metered_ice_servers(
-                    metered_app_name, metered_api_key
-                )
-            }
+            return make_rtc_configuration(
+                fetch_metered_ice_servers(metered_app_name, metered_api_key)
+            )
         except Exception:
             st.warning("TURN server credentials could not be loaded; using STUN only.")
 
-    return {"iceServers": DEFAULT_WEBRTC_ICE_SERVERS}
+    return make_rtc_configuration(DEFAULT_WEBRTC_ICE_SERVERS)
+
+
+def show_webrtc_network_status(rtc_configuration):
+    ice_servers = rtc_configuration.get("iceServers", [])
+    if has_turn_server(ice_servers):
+        st.caption("Camera network: TURN relay")
+    else:
+        st.warning(
+            "Camera network: STUN only. On Streamlit Cloud, add TURN secrets "
+            "if the camera does not connect."
+        )
 
 
 def render_video_camera(key, video_processor_factory):
@@ -174,10 +208,12 @@ def render_video_camera(key, video_processor_factory):
                 "To switch cameras: STOP, SELECT DEVICE, choose the camera, "
                 "Done, then START."
             )
+            rtc_configuration = build_webrtc_rtc_configuration()
+            show_webrtc_network_status(rtc_configuration)
             webrtc_streamer(
                 key=key,
                 mode=WebRtcMode.SENDRECV,
-                rtc_configuration=build_webrtc_rtc_configuration(),
+                rtc_configuration=rtc_configuration,
                 media_stream_constraints={"video": True, "audio": False},
                 video_processor_factory=video_processor_factory,
                 async_processing=True,

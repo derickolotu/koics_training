@@ -33,6 +33,8 @@ metered_api_key = "your-metered-turn-api-key"
 
 5. Save secrets, then reboot the app.
 
+After reboot, the camera tab should show `Camera network: TURN relay`. If it still says `Camera network: STUN only`, the secrets were not saved, the key names are different, or the TURN credential request failed.
+
 You can also use another TURN provider by setting a raw `iceServers` array:
 
 ```toml
