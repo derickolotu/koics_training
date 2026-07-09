@@ -46,6 +46,11 @@ CUSTOM_OBJECT_LABELS = [
 ]
 LICENSE_PLATE_ALLOWLIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 CAMERA_VIDEO_LAYOUT = [65, 35]
+WEBRTC_RTC_CONFIGURATION = {
+    "iceServers": [
+        {"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]}
+    ]
+}
 
 
 st.set_page_config(page_title="Vision Projects", layout="wide")
@@ -101,6 +106,7 @@ def render_video_camera(key, video_processor_factory):
             webrtc_streamer(
                 key=key,
                 mode=WebRtcMode.SENDRECV,
+                rtc_configuration=WEBRTC_RTC_CONFIGURATION,
                 media_stream_constraints={"video": True, "audio": False},
                 video_processor_factory=video_processor_factory,
                 async_processing=True,
