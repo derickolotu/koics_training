@@ -14,7 +14,7 @@ Notes:
 - The app uses `streamlit-webrtc`, so camera access must run over HTTPS. Streamlit Community Cloud provides HTTPS automatically.
 - WebRTC camera streaming can still fail on some networks. If the camera does not connect and the logs show `Transaction.__retry()` or ICE connection errors, use a different network or configure a TURN server. Public STUN servers are configured in the app, but they are not enough for every firewall/NAT.
 - Python dependencies are in the repository root so Community Cloud detects them reliably.
-- The free Community Cloud deployment excludes `face-recognition` and `easyocr` because they pull large native or ML dependencies that commonly fail or time out on free builders. The deployed app uses OpenCV's lighter face-recognition fallback, so Face Recognition still runs on Cloud. EasyOCR remains available locally where that package is installed.
+- The free Community Cloud deployment excludes `face-recognition` and `easyocr` because they pull large native or ML dependencies that commonly fail or time out on free builders. The deployed app uses OpenCV's lighter face-recognition fallback and Tesseract OCR, so Face Recognition, OCR, and license plate text reading still run on Cloud. EasyOCR remains available locally where that package is installed.
 
 ## Free TURN setup for camera video
 

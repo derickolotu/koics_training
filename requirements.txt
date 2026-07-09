@@ -3,4 +3,5 @@ streamlit-webrtc==0.75.0
 numpy>=2,<3
 opencv-contrib-python-headless>=4.10,<5
 pillow==12.2.0
+pytesseract==0.3.13
 setuptools<81

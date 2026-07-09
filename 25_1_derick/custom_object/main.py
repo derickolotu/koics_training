@@ -1,6 +1,7 @@
 import json
 import importlib.util
 from pathlib import Path
+import shutil
 import urllib.parse
 import urllib.request
 
@@ -26,6 +27,11 @@ HAS_FACE_RECOGNITION = (
     HAS_FACE_RECOGNITION_PACKAGE or HAS_OPENCV_FACE_RECOGNITION
 )
 HAS_EASYOCR = importlib.util.find_spec("easyocr") is not None
+HAS_TESSERACT_OCR = (
+    importlib.util.find_spec("pytesseract") is not None
+    and shutil.which("tesseract") is not None
+)
+HAS_OCR = HAS_EASYOCR or HAS_TESSERACT_OCR
 HAS_STREAMLIT_WEBRTC = importlib.util.find_spec("streamlit_webrtc") is not None
 WEBRTC_DEVICE_PATCHED = False
 
@@ -59,6 +65,7 @@ FACE_CASCADE_PATH = Path(cv.data.haarcascades) / "haarcascade_frontalface_defaul
 OPENCV_FACE_SIZE = (160, 160)
 OPENCV_LBPH_MIN_THRESHOLD = 40
 OPENCV_LBPH_THRESHOLD_SCALE = 100
+TESSERACT_LANGUAGE_CODES = {"en": "eng", "es": "spa"}
 DEFAULT_WEBRTC_ICE_SERVERS = [
     {"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]}
 ]
@@ -661,11 +668,66 @@ def load_ocr_reader(languages, use_gpu):
 
 
 def create_ocr_reader(languages, use_gpu):
-    if not HAS_EASYOCR:
-        raise RuntimeError("The easyocr package is not installed.")
-    from easyocr import Reader
+    if HAS_EASYOCR:
+        from easyocr import Reader
 
-    return Reader(list(languages), gpu=use_gpu)
+        return Reader(list(languages), gpu=use_gpu)
+    if HAS_TESSERACT_OCR:
+        return TesseractOCRReader(languages)
+    raise RuntimeError("Install easyocr or pytesseract with tesseract-ocr.")
+
+
+class TesseractOCRReader:
+    def __init__(self, languages):
+        self.languages = tuple(languages)
+
+    def readtext(self, image_rgb, allowlist=None):
+        import pytesseract
+        from pytesseract import Output
+
+        lang = "+".join(
+            TESSERACT_LANGUAGE_CODES.get(language, language)
+            for language in self.languages
+        )
+        config_parts = ["--psm 6"]
+        if allowlist:
+            config_parts.append(f"-c tessedit_char_whitelist={allowlist}")
+        data = pytesseract.image_to_data(
+            image_rgb,
+            lang=lang or "eng",
+            config=" ".join(config_parts),
+            output_type=Output.DICT,
+        )
+        detections = []
+        for index, text in enumerate(data.get("text", [])):
+            text = text.strip()
+            if not text:
+                continue
+            confidence = parse_tesseract_confidence(data["conf"][index])
+            if confidence is None:
+                continue
+            left = int(data["left"][index])
+            top = int(data["top"][index])
+            width = int(data["width"][index])
+            height = int(data["height"][index])
+            box = [
+                (left, top),
+                (left + width, top),
+                (left + width, top + height),
+                (left, top + height),
+            ]
+            detections.append((box, text, confidence))
+        return detections
+
+
+def parse_tesseract_confidence(value):
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return None
+    if confidence < 0:
+        return None
+    return confidence / 100
 
 
 def get_font(size):
@@ -1001,13 +1063,18 @@ def render_face_recognition():
 
 
 def render_easyocr():
-    st.header("EasyOCR")
-    if not HAS_EASYOCR:
-        st.error("Install easyocr to use this project.")
+    st.header("OCR")
+    if not HAS_OCR:
+        st.error(
+            "Install easyocr or pytesseract with tesseract-ocr "
+            "to use this project."
+        )
         return
+    if not HAS_EASYOCR:
+        st.info("EasyOCR is not installed in this deployment; using Tesseract OCR.")
 
     languages = st.multiselect("Languages", ["en", "es"], default=["en", "es"])
-    use_gpu = st.checkbox("GPU", value=False)
+    use_gpu = st.checkbox("GPU", value=False, disabled=not HAS_EASYOCR)
     if not languages:
         st.warning("Select at least one language.")
         return
@@ -1036,16 +1103,21 @@ def render_license_plate_recognition():
         st.error(f"Model file not found: {LICENSE_PLATE_MODEL_PATH}")
         return
 
-    if not HAS_EASYOCR:
+    if not HAS_OCR:
         st.info(
-            "EasyOCR is not installed in this deployment, so license plate text "
+            "OCR is not installed in this deployment, so license plate text "
             "reading is disabled. Plate detection still works."
         )
+    elif not HAS_EASYOCR:
+        st.info("EasyOCR is not installed in this deployment; using Tesseract OCR.")
 
-    read_text = st.checkbox("Read plate text with EasyOCR", value=HAS_EASYOCR)
+    read_text = st.checkbox("Read plate text with OCR", value=HAS_OCR)
 
-    if read_text and not HAS_EASYOCR:
-        st.error("Install easyocr to read license plate text.")
+    if read_text and not HAS_OCR:
+        st.error(
+            "Install easyocr or pytesseract with tesseract-ocr "
+            "to read plate text."
+        )
         return
 
     languages = []
@@ -1057,7 +1129,9 @@ def render_license_plate_recognition():
             default=["en"],
             key="license_plate_languages",
         )
-        use_gpu = st.checkbox("GPU", value=False, key="license_plate_gpu")
+        use_gpu = st.checkbox(
+            "GPU", value=False, key="license_plate_gpu", disabled=not HAS_EASYOCR
+        )
 
     if read_text and not languages:
         st.warning("Select at least one OCR language.")
@@ -1085,21 +1159,25 @@ def render_license_plate_recognition():
 
 
 def render_combined():
-    st.header("Face Recognition + EasyOCR")
+    st.header("Face Recognition + OCR")
     missing = []
     if not HAS_FACE_RECOGNITION:
         missing.append("face_recognition or opencv-contrib-python-headless")
-    if not HAS_EASYOCR:
-        missing.append("easyocr")
+    if not HAS_OCR:
+        missing.append("easyocr or pytesseract with tesseract-ocr")
     if missing:
         st.error(f"Install {', '.join(missing)} to use this project.")
         return
+    if not HAS_EASYOCR:
+        st.info("EasyOCR is not installed in this deployment; using Tesseract OCR.")
 
     tolerance = st.slider("Tolerance", 0.35, 0.75, 0.6, 0.01, key="combined_tol")
     languages = st.multiselect(
         "Languages", ["en", "es"], default=["en", "es"], key="combined_languages"
     )
-    use_gpu = st.checkbox("GPU", value=False, key="combined_gpu")
+    use_gpu = st.checkbox(
+        "GPU", value=False, key="combined_gpu", disabled=not HAS_EASYOCR
+    )
     faces_signature = faces_dir_signature(FACES_DIR)
 
     if not languages:
