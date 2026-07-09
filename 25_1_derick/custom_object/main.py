@@ -18,7 +18,13 @@ LICENSE_PLATE_MODEL_PATH = (
 )
 FACES_DIR = ROOT_DIR / "face-recognition" / "faces"
 OCR_FONT_PATH = ROOT_DIR / "24_2_python" / "calibri.ttf"
-HAS_FACE_RECOGNITION = importlib.util.find_spec("face_recognition") is not None
+HAS_FACE_RECOGNITION_PACKAGE = importlib.util.find_spec("face_recognition") is not None
+HAS_OPENCV_FACE_RECOGNITION = (
+    hasattr(cv, "face") and hasattr(cv.face, "LBPHFaceRecognizer_create")
+)
+HAS_FACE_RECOGNITION = (
+    HAS_FACE_RECOGNITION_PACKAGE or HAS_OPENCV_FACE_RECOGNITION
+)
 HAS_EASYOCR = importlib.util.find_spec("easyocr") is not None
 HAS_STREAMLIT_WEBRTC = importlib.util.find_spec("streamlit_webrtc") is not None
 WEBRTC_DEVICE_PATCHED = False
@@ -49,6 +55,10 @@ CUSTOM_OBJECT_LABELS = [
 ]
 LICENSE_PLATE_ALLOWLIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 CAMERA_VIDEO_LAYOUT = [65, 35]
+FACE_CASCADE_PATH = Path(cv.data.haarcascades) / "haarcascade_frontalface_default.xml"
+OPENCV_FACE_SIZE = (160, 160)
+OPENCV_LBPH_MIN_THRESHOLD = 40
+OPENCV_LBPH_THRESHOLD_SCALE = 100
 DEFAULT_WEBRTC_ICE_SERVERS = [
     {"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]}
 ]
@@ -442,8 +452,16 @@ def faces_dir_signature(faces_dir):
 
 
 def create_known_faces(faces_dir):
-    if not HAS_FACE_RECOGNITION:
-        raise RuntimeError("The face_recognition package is not installed.")
+    if HAS_FACE_RECOGNITION_PACKAGE:
+        return create_known_faces_with_face_recognition(faces_dir)
+    if HAS_OPENCV_FACE_RECOGNITION:
+        return create_known_faces_with_opencv(faces_dir)
+    raise RuntimeError(
+        "Install face_recognition or opencv-contrib-python-headless."
+    )
+
+
+def create_known_faces_with_face_recognition(faces_dir):
     import face_recognition
 
     encodings = []
@@ -458,6 +476,62 @@ def create_known_faces(faces_dir):
             names.append(training_face_name(image_path))
 
     return encodings, names
+
+
+@st.cache_resource
+def load_opencv_face_detector():
+    detector = cv.CascadeClassifier(str(FACE_CASCADE_PATH))
+    if detector.empty():
+        raise RuntimeError(f"OpenCV face cascade not found: {FACE_CASCADE_PATH}")
+    return detector
+
+
+def detect_opencv_face_boxes(gray):
+    detector = load_opencv_face_detector()
+    boxes = detector.detectMultiScale(
+        gray,
+        scaleFactor=1.1,
+        minNeighbors=5,
+        minSize=(40, 40),
+    )
+    return sorted(boxes, key=lambda box: box[2] * box[3], reverse=True)
+
+
+def prepare_opencv_face_crop(gray, box=None):
+    if box is not None:
+        x, y, width, height = box
+        gray = gray[y : y + height, x : x + width]
+    face = cv.resize(gray, OPENCV_FACE_SIZE)
+    return cv.equalizeHist(face)
+
+
+def create_known_faces_with_opencv(faces_dir):
+    face_images = []
+    labels = []
+    names = []
+    name_to_label = {}
+
+    for image_path in sorted(Path(faces_dir).iterdir()):
+        if image_path.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
+            continue
+        image = load_training_face_image(image_path)
+        gray = cv.cvtColor(image, cv.COLOR_RGB2GRAY)
+        gray = cv.equalizeHist(gray)
+        boxes = detect_opencv_face_boxes(gray)
+        face = prepare_opencv_face_crop(gray, boxes[0] if boxes else None)
+        name = training_face_name(image_path)
+        if name not in name_to_label:
+            name_to_label[name] = len(names)
+            names.append(name)
+        face_images.append(face)
+        labels.append(name_to_label[name])
+
+    if not face_images:
+        return None, []
+
+    recognizer = cv.face.LBPHFaceRecognizer_create()
+    recognizer.train(face_images, np.asarray(labels, dtype=np.int32))
+    return recognizer, names
 
 
 def load_training_face_image(image_path):
@@ -476,8 +550,22 @@ def training_face_name(image_path):
 
 
 def run_face_recognition(image, known_encodings, known_names, tolerance):
-    if not HAS_FACE_RECOGNITION:
-        raise RuntimeError("The face_recognition package is not installed.")
+    if HAS_FACE_RECOGNITION_PACKAGE:
+        return run_face_recognition_with_face_recognition(
+            image, known_encodings, known_names, tolerance
+        )
+    if HAS_OPENCV_FACE_RECOGNITION:
+        return run_face_recognition_with_opencv(
+            image, known_encodings, known_names, tolerance
+        )
+    raise RuntimeError(
+        "Install face_recognition or opencv-contrib-python-headless."
+    )
+
+
+def run_face_recognition_with_face_recognition(
+    image, known_encodings, known_names, tolerance
+):
     import face_recognition
 
     result = image.copy()
@@ -515,6 +603,52 @@ def run_face_recognition(image, known_encodings, known_names, tolerance):
                 "name": name,
                 "distance": round(distance, 3) if distance is not None else None,
                 "box": f"{left}, {top}, {right - left}, {bottom - top}",
+            }
+        )
+
+    return result, rows
+
+
+def opencv_lbph_threshold(tolerance):
+    return OPENCV_LBPH_MIN_THRESHOLD + (tolerance * OPENCV_LBPH_THRESHOLD_SCALE)
+
+
+def run_face_recognition_with_opencv(image, recognizer, known_names, tolerance):
+    result = image.copy()
+    gray = cv.cvtColor(image, cv.COLOR_BGR2GRAY)
+    gray = cv.equalizeHist(gray)
+    boxes = detect_opencv_face_boxes(gray)
+    rows = []
+    threshold = opencv_lbph_threshold(tolerance)
+
+    for x, y, width, height in boxes:
+        face = prepare_opencv_face_crop(gray, (x, y, width, height))
+        name = "Unknown"
+        distance = None
+
+        if recognizer is not None and known_names:
+            label, confidence = recognizer.predict(face)
+            distance = float(confidence)
+            if 0 <= label < len(known_names) and confidence <= threshold:
+                name = known_names[label]
+
+        left, top, right, bottom = x, y, x + width, y + height
+        cv.rectangle(result, (left, top), (right, bottom), (0, 160, 255), 2)
+        cv.rectangle(result, (left, max(top - 34, 0)), (right, top), (0, 160, 255), -1)
+        cv.putText(
+            result,
+            name,
+            (left + 6, max(top - 10, 20)),
+            cv.FONT_HERSHEY_DUPLEX,
+            0.8,
+            (0, 0, 0),
+            1,
+        )
+        rows.append(
+            {
+                "name": name,
+                "distance": round(distance, 1) if distance is not None else None,
+                "box": f"{left}, {top}, {width}, {height}",
             }
         )
 
@@ -829,7 +963,10 @@ def render_object_detection():
 def render_face_recognition():
     st.header("Face Recognition")
     if not HAS_FACE_RECOGNITION:
-        st.error("Install face_recognition to use this project.")
+        st.error(
+            "Install face_recognition or opencv-contrib-python-headless "
+            "to use this project."
+        )
         return
 
     tolerance = st.slider("Tolerance", 0.35, 0.75, 0.6, 0.01)
@@ -951,7 +1088,7 @@ def render_combined():
     st.header("Face Recognition + EasyOCR")
     missing = []
     if not HAS_FACE_RECOGNITION:
-        missing.append("face_recognition")
+        missing.append("face_recognition or opencv-contrib-python-headless")
     if not HAS_EASYOCR:
         missing.append("easyocr")
     if missing:
