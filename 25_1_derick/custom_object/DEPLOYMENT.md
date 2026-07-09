@@ -12,5 +12,5 @@ Use these settings:
 Notes:
 
 - The app uses `streamlit-webrtc`, so camera access must run over HTTPS. Streamlit Community Cloud provides HTTPS automatically.
-- The dependency files live beside `main.py` because Community Cloud looks in the entrypoint directory for `requirements.txt` and `packages.txt`.
+- The dependency files are in the repository root so Community Cloud detects both Python packages and Debian packages reliably.
 - If the app build fails, open the Streamlit Cloud logs first. The likely failure point is compiling `dlib`, which is required by `face-recognition`.
