@@ -1,5 +1,8 @@
+import json
 import importlib.util
 from pathlib import Path
+import urllib.parse
+import urllib.request
 
 import cv2 as cv
 import numpy as np
@@ -46,11 +49,10 @@ CUSTOM_OBJECT_LABELS = [
 ]
 LICENSE_PLATE_ALLOWLIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 CAMERA_VIDEO_LAYOUT = [65, 35]
-WEBRTC_RTC_CONFIGURATION = {
-    "iceServers": [
-        {"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]}
-    ]
-}
+DEFAULT_WEBRTC_ICE_SERVERS = [
+    {"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]}
+]
+WEBRTC_TURN_FETCH_TIMEOUT_SECONDS = 5
 
 
 st.set_page_config(page_title="Vision Projects", layout="wide")
@@ -83,6 +85,75 @@ def image_video_input(key_prefix, video_renderer):
     return image
 
 
+def get_webrtc_secret(key):
+    try:
+        webrtc_secrets = st.secrets.get("webrtc", {})
+    except Exception:
+        return ""
+
+    value = webrtc_secrets.get(key, "")
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def normalize_metered_app_name(value):
+    app_name = value.strip()
+    app_name = app_name.removeprefix("https://").removeprefix("http://")
+    app_name = app_name.split("/", maxsplit=1)[0]
+    return app_name.removesuffix(".metered.live")
+
+
+def parse_ice_servers_json(value):
+    ice_servers = json.loads(value)
+    if not isinstance(ice_servers, list) or not ice_servers:
+        raise ValueError("ice_servers_json must be a non-empty JSON array.")
+    return ice_servers
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_metered_ice_servers(app_name, api_key):
+    encoded_key = urllib.parse.quote(api_key)
+    url = (
+        f"https://{app_name}.metered.live/api/v1/turn/credentials"
+        f"?apiKey={encoded_key}"
+    )
+    with urllib.request.urlopen(  # noqa: S310 - configured TURN credential endpoint
+        url, timeout=WEBRTC_TURN_FETCH_TIMEOUT_SECONDS
+    ) as response:
+        payload = response.read().decode("utf-8")
+
+    ice_servers = json.loads(payload)
+    if not isinstance(ice_servers, list) or not ice_servers:
+        raise ValueError("Metered did not return a non-empty iceServers array.")
+    return ice_servers
+
+
+def build_webrtc_rtc_configuration():
+    ice_servers_json = get_webrtc_secret("ice_servers_json")
+    if ice_servers_json:
+        try:
+            return {"iceServers": parse_ice_servers_json(ice_servers_json)}
+        except Exception:
+            st.warning("Invalid TURN server JSON in Streamlit secrets; using STUN only.")
+
+    metered_app_name = normalize_metered_app_name(
+        get_webrtc_secret("metered_app_name")
+    )
+    metered_api_key = get_webrtc_secret("metered_api_key")
+    if metered_app_name and metered_api_key:
+        try:
+            return {
+                "iceServers": fetch_metered_ice_servers(
+                    metered_app_name, metered_api_key
+                )
+            }
+        except Exception:
+            st.warning("TURN server credentials could not be loaded; using STUN only.")
+
+    return {"iceServers": DEFAULT_WEBRTC_ICE_SERVERS}
+
+
 def render_video_camera(key, video_processor_factory):
     if not HAS_STREAMLIT_WEBRTC:
         st.error("Install streamlit-webrtc to use camera video.")
@@ -106,7 +177,7 @@ def render_video_camera(key, video_processor_factory):
             webrtc_streamer(
                 key=key,
                 mode=WebRtcMode.SENDRECV,
-                rtc_configuration=WEBRTC_RTC_CONFIGURATION,
+                rtc_configuration=build_webrtc_rtc_configuration(),
                 media_stream_constraints={"video": True, "audio": False},
                 video_processor_factory=video_processor_factory,
                 async_processing=True,
